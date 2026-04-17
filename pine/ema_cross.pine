@@ -1,0 +1,17 @@
+//@version=5
+indicator("EMA Crossover [9/21]", overlay=true)
+
+fast_ema = ta.ema(close, 9)
+slow_ema = ta.ema(close, 21)
+
+plot(fast_ema, "Fast EMA", color=color.blue, linewidth=2)
+plot(slow_ema, "Slow EMA", color=color.red, linewidth=2)
+
+bullish = ta.crossover(fast_ema, slow_ema)
+bearish = ta.crossunder(fast_ema, slow_ema)
+
+plotshape(bullish, "Buy", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(bearish, "Sell", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+alertcondition(bullish, "EMA Bullish Cross", "EMA {fast} crossed above EMA {slow}")
+alertcondition(bearish, "EMA Bearish Cross", "EMA {fast} crossed below EMA {slow}")

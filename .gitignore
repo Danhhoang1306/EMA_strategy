@@ -1,0 +1,17 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# MetaTrader compiled binaries
+*.ex5
+*.ex4
+*.log
+
+# Secrets
+.env
+*.env.local

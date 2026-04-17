@@ -1,0 +1,107 @@
+//@version=5
+indicator("Vol Z-Score Filter (ATR-based)", overlay=false, precision=4)
+
+// ══════════════════════════════════════════════════════════
+//   Companion visualizer cho EMA14_Fade (Vol-Z) filter.
+//   Dùng chung công thức với ema14_fade_volz.pine để
+//   trực quan hóa: khi nào ATR ngắn vượt ngưỡng mean + N·σ
+//   → filter sẽ block entry.
+// ══════════════════════════════════════════════════════════
+
+// ─── Inputs (match với ema14_fade_volz.pine) ─────────────
+atrShortLen    = input.int(3,     "Short ATR length",       minval=2, maxval=20, group="Vol Z-Score",
+     tooltip="Độ dài ATR nhạy để bắt shock. 2 = nhạy nhất. 3-5 = cân bằng. >5 = ít nhạy.")
+atrBaselineLen = input.int(100,   "Baseline length",        minval=20, group="Vol Z-Score",
+     tooltip="Số bar để tính mean và stdev của ATR ngắn.")
+volZThreshold  = input.float(2.0, "Max Z-score threshold",  step=0.1, minval=0.5, maxval=5.0, group="Vol Z-Score",
+     tooltip="Block khi ATR ngắn vượt mean + N·stdev. 2.0 = ~5-10% thời gian bất thường nhất.")
+
+// ─── Display modes ───────────────────────────────────────
+displayMode    = input.string("ATR bands", "Display mode",
+     options=["ATR bands", "Z-score"], group="Display",
+     tooltip="'ATR bands': xem ATR + baseline mean ± N·σ trên giá thực của ATR.\n'Z-score': xem trực tiếp chỉ số Z chuẩn hóa và ngưỡng.")
+showLowerBand  = input.bool(true, "Show lower band (mean − N·σ)", group="Display")
+showFill       = input.bool(true, "Fill normal zone",             group="Display")
+highlightBlock = input.bool(true, "Highlight blocked bars (bg)",  group="Display")
+
+// ─── Colors ──────────────────────────────────────────────
+colAtr    = input.color(color.yellow,               "ATR short",    group="Colors")
+colMean   = input.color(color.aqua,                 "Baseline mean",group="Colors")
+colUpper  = input.color(color.red,                  "Upper band",   group="Colors")
+colLower  = input.color(color.new(color.green, 20), "Lower band",   group="Colors")
+colFill   = input.color(color.new(color.gray, 88),  "Normal fill",  group="Colors")
+colZero   = input.color(color.new(color.gray, 50),  "Z-zero line",  group="Colors")
+
+// ══════════════════════════════════════════════════════════
+//   CORE CALC (identical to ema14_fade_volz.pine)
+// ══════════════════════════════════════════════════════════
+atrShort_v = ta.atr(atrShortLen)
+atrMean_v  = ta.sma(atrShort_v, atrBaselineLen)
+atrStd_v   = ta.stdev(atrShort_v, atrBaselineLen)
+atrZ       = atrStd_v > 0 ? (atrShort_v - atrMean_v) / atrStd_v : 0.0
+
+atrUpperBand = atrMean_v + volZThreshold * atrStd_v
+atrLowerBand = atrMean_v - volZThreshold * atrStd_v
+
+volBlocked = atrZ >= volZThreshold
+
+// ══════════════════════════════════════════════════════════
+//   PLOTS
+// ══════════════════════════════════════════════════════════
+showBands = displayMode == "ATR bands"
+showZ     = displayMode == "Z-score"
+
+// ── ATR bands mode ──
+pAtr   = plot(showBands ? atrShort_v   : na, "ATR short",       color=colAtr,   linewidth=2)
+pMean  = plot(showBands ? atrMean_v    : na, "Baseline mean",   color=colMean,  linewidth=1)
+pUp    = plot(showBands ? atrUpperBand : na, "Upper (mean+Nσ)", color=colUpper, linewidth=2)
+pLow   = plot(showBands and showLowerBand ? atrLowerBand : na, "Lower (mean−Nσ)", color=colLower, linewidth=1)
+
+// Fill vùng "normal zone" (giữa mean và upper) — khi ATR nằm trong đây thì filter OK
+fill(pMean, pUp, color=showBands and showFill ? colFill : na, title="Normal zone")
+
+// ── Z-score mode ──
+pZ     = plot(showZ ? atrZ          : na, "Z-score",            color=colAtr,   linewidth=2)
+pZup   = plot(showZ ? volZThreshold : na, "Threshold (+Nσ)",    color=colUpper, linewidth=2, style=plot.style_line)
+pZlow  = plot(showZ and showLowerBand ? -volZThreshold : na, "−Threshold",     color=colLower, linewidth=1)
+hline(showZ ? 0 : na, "Zero",  color=colZero, linestyle=hline.style_dotted)
+
+// Fill giữa 0 và threshold
+fill(pZ, pZup, color=showZ and showFill ? colFill : na, title="Z normal zone")
+
+// ── Block highlight ──
+bgcolor(highlightBlock and volBlocked ? color.new(color.red, 85) : na, title="Vol-Z blocking")
+
+// ══════════════════════════════════════════════════════════
+//   INFO TABLE (góc phải trên)
+// ══════════════════════════════════════════════════════════
+showTable = input.bool(true, "Show info table", group="Display")
+
+var table infoTable = table.new(position.top_right, 2, 6, border_width=1)
+if barstate.islast and showTable
+    status = volBlocked ? "🔴 BLOCKED" : "🟢 OK"
+    statusCol = volBlocked ? color.red : color.green
+    table.cell(infoTable, 0, 0, "Metric", bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.cell(infoTable, 1, 0, "Value",  bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.cell(infoTable, 0, 1, "ATR short",    text_color=color.white)
+    table.cell(infoTable, 1, 1, str.tostring(atrShort_v, "#.#####"), text_color=color.white)
+    table.cell(infoTable, 0, 2, "Baseline mean", text_color=color.white)
+    table.cell(infoTable, 1, 2, str.tostring(atrMean_v, "#.#####"),  text_color=color.white)
+    table.cell(infoTable, 0, 3, "Baseline σ",    text_color=color.white)
+    table.cell(infoTable, 1, 3, str.tostring(atrStd_v, "#.#####"),   text_color=color.white)
+    table.cell(infoTable, 0, 4, "Z-score",       text_color=color.white)
+    table.cell(infoTable, 1, 4, str.tostring(atrZ, "#.##"),
+         text_color=atrZ >= volZThreshold ? color.red : color.white)
+    table.cell(infoTable, 0, 5, "Status",        text_color=color.white)
+    table.cell(infoTable, 1, 5, status, text_color=statusCol)
+
+// ══════════════════════════════════════════════════════════
+//   ALERTS
+// ══════════════════════════════════════════════════════════
+volBlockStart = volBlocked and not volBlocked[1]
+volBlockEnd   = not volBlocked and volBlocked[1]
+
+alertcondition(volBlockStart, "Vol regime: HIGH (blocking)",
+     "Vol Z-score crossed above {{plot_0}} — filter BLOCKING on {{ticker}} {{interval}}")
+alertcondition(volBlockEnd,   "Vol regime: NORMAL (unblocked)",
+     "Vol Z-score dropped below threshold — filter OK on {{ticker}} {{interval}}")
