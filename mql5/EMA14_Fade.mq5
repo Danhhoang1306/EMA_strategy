@@ -84,6 +84,12 @@ input group "─── Full-Bar Filter ───"
 input bool   InpUseFullBarFilter = true;   // Enable full-bar filter before cross
 input double InpFullBarOffset    = 0.3;    // Full-bar offset (σ): BUY needs low>EMA+Nσ, SELL needs high<EMA-Nσ
 
+input group "─── Session Filter ───"
+input bool   InpUseSessionFilter = false;  // Enable session-time filter (block entries near open/close)
+input int    InpOpenBufferMin    = 60;     // Skip entries within N minutes AFTER session open
+input int    InpCloseBufferMin   = 60;     // Skip entries within N minutes BEFORE session close
+input bool   InpLogSessionReject = true;   // Log when session filter rejects an entry
+
 input group "─── Direction Toggles ───"
 input bool   InpEnableLong    = true;      // Enable LONG entries
 input bool   InpEnableShort   = true;      // Enable SHORT entries
@@ -200,6 +206,55 @@ bool          g_windowShort  = false;
 bool GridOn()       { return InpUseGridEntry; }
 bool GridIsPoint()  { return InpGridMode == GRID_MODE_FIXED_POINT; }
 bool GridIsStd()    { return InpGridMode == GRID_MODE_STD; }
+
+//==================================================================
+//                         SESSION FILTER
+//==================================================================
+// Check whether current server time falls inside the "no-entry" buffer
+// around any of today's trading sessions for _Symbol.
+// Returns true if entry is allowed, false if blocked (near open/close).
+bool SessionFilterOk(string &reason)
+{
+   reason = "";
+   if(!InpUseSessionFilter) return true;
+
+   datetime now = TimeCurrent();
+   MqlDateTime nowDt;
+   TimeToStruct(now, nowDt);
+   ENUM_DAY_OF_WEEK dow = (ENUM_DAY_OF_WEEK)nowDt.day_of_week;
+
+   datetime dayBase = now - (nowDt.hour * 3600 + nowDt.min * 60 + nowDt.sec);
+   long openBufSec  = (long)InpOpenBufferMin  * 60;
+   long closeBufSec = (long)InpCloseBufferMin * 60;
+
+   // Iterate all sessions for today (MT5 allows up to a few per day)
+   for(uint idx = 0; idx < 8; idx++)
+   {
+      datetime from = 0, to = 0;
+      if(!SymbolInfoSessionTrade(_Symbol, dow, idx, from, to)) break;
+
+      datetime open_t  = dayBase + (long)from;
+      datetime close_t = dayBase + (long)to;
+
+      if(now >= open_t && now < open_t + openBufSec)
+      {
+         reason = StringFormat("within %d min after open (session %u: %s..%s)",
+                    InpOpenBufferMin, idx,
+                    TimeToString(open_t,  TIME_MINUTES),
+                    TimeToString(close_t, TIME_MINUTES));
+         return false;
+      }
+      if(now > close_t - closeBufSec && now <= close_t)
+      {
+         reason = StringFormat("within %d min before close (session %u: %s..%s)",
+                    InpCloseBufferMin, idx,
+                    TimeToString(open_t,  TIME_MINUTES),
+                    TimeToString(close_t, TIME_MINUTES));
+         return false;
+      }
+   }
+   return true;
+}
 
 //==================================================================
 //                              INIT
@@ -1451,12 +1506,24 @@ void OnTick()
          }
          else
          {
-            double ext = armedExtLong;
-            // Reset armed state
-            barsSinceArmedLong = -1;  armedExtLong = 0;
-            g_confirmLong = 0;  g_windowLong = false;
-            ExecuteLong(ext);
-            return;
+            string sess_reason;
+            if(!SessionFilterOk(sess_reason))
+            {
+               if(InpLogSessionReject)
+                  PrintFormat("Session REJECT LONG @ %.*f | %s | ext=%.2fσ → armed cancelled",
+                              _Digits, bid, sess_reason, armedExtLong);
+               barsSinceArmedLong = -1;  armedExtLong = 0;
+               g_confirmLong = 0;  g_windowLong = false;
+            }
+            else
+            {
+               double ext = armedExtLong;
+               // Reset armed state
+               barsSinceArmedLong = -1;  armedExtLong = 0;
+               g_confirmLong = 0;  g_windowLong = false;
+               ExecuteLong(ext);
+               return;
+            }
          }
       }
 
@@ -1473,11 +1540,23 @@ void OnTick()
          }
          else
          {
-            double ext = armedExtShort;
-            barsSinceArmedShort = -1;  armedExtShort = 0;
-            g_confirmShort = 0;  g_windowShort = false;
-            ExecuteShort(ext);
-            return;
+            string sess_reason;
+            if(!SessionFilterOk(sess_reason))
+            {
+               if(InpLogSessionReject)
+                  PrintFormat("Session REJECT SHORT @ %.*f | %s | ext=%.2fσ → armed cancelled",
+                              _Digits, ask, sess_reason, armedExtShort);
+               barsSinceArmedShort = -1;  armedExtShort = 0;
+               g_confirmShort = 0;  g_windowShort = false;
+            }
+            else
+            {
+               double ext = armedExtShort;
+               barsSinceArmedShort = -1;  armedExtShort = 0;
+               g_confirmShort = 0;  g_windowShort = false;
+               ExecuteShort(ext);
+               return;
+            }
          }
       }
    }
