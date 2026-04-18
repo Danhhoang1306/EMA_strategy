@@ -406,17 +406,19 @@ double GetAtrShort(int shift)
    return buf[0];
 }
 
-// Compute z-score of atrShort vs its (sma, stdev) over `baselineLen` bars ending at `shift`.
-// Matches Pine: (atrShort - sma(atrShort,N)) / stdev(atrShort,N). Biased stdev (population).
+// Compute z-score of atrShort (at `shift`) vs its (sma, stdev) over `baselineLen`
+// previous bars. Baseline EXCLUDES the bar being tested — otherwise an outlier
+// atrNow would inflate its own stdev and dampen the resulting z-score.
 // Returns 0 if baseline stdev == 0. Writes mean/stdev via output refs.
 double GetAtrZScore(int baselineLen, int shift, double &meanOut, double &stdOut)
 {
    meanOut = 0; stdOut = 0;
    if(baselineLen <= 1) return 0;
 
+   // Read baseline from shift+1 back (skip the bar being tested)
    double buf[];
    ArraySetAsSeries(buf, true);
-   if(CopyBuffer(hAtrShort, 0, shift, baselineLen, buf) <= 0) return 0;
+   if(CopyBuffer(hAtrShort, 0, shift + 1, baselineLen, buf) <= 0) return 0;
 
    double sum = 0;
    for(int i = 0; i < baselineLen; i++) sum += buf[i];
@@ -433,7 +435,7 @@ double GetAtrZScore(int baselineLen, int shift, double &meanOut, double &stdOut)
    meanOut = mean; stdOut = std;
    if(std <= 0) return 0;
 
-   double atrNow = GetAtrShort(shift);
+   double atrNow = GetAtrShort(shift);  // the bar being tested (NOT in baseline)
    return (atrNow - mean) / std;
 }
 
