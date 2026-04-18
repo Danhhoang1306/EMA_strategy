@@ -233,8 +233,8 @@ bool SessionFilterOk(string &reason)
       datetime from = 0, to = 0;
       if(!SymbolInfoSessionTrade(_Symbol, dow, idx, from, to)) break;
 
-      datetime open_t  = dayBase + (long)from;
-      datetime close_t = dayBase + (long)to;
+      datetime open_t  = (datetime)(dayBase + (long)from);
+      datetime close_t = (datetime)(dayBase + (long)to);
 
       if(now >= open_t && now < open_t + openBufSec)
       {
