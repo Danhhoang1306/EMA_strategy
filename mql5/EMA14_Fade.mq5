@@ -10,8 +10,12 @@
 //|                                                                  |
 //|  GRID ENTRY (DCA fade deeper):                                   |
 //|    Level 0 = main entry (market, fired at confirm touch)         |
-//|    Level i = entry ± i*gridSpacing*dev (adverse direction)       |
-//|    Risk = InpRiskPercent / gridLevels per level                  |
+//|    Spacing mode:                                                 |
+//|      STD         : level i = entry ± i*InpGridSpacingStd*dev     |
+//|      FIXED_POINT : level i = entry ± i*InpGridSpacingPoints*_Pt  |
+//|    Volume mode (both applied to each level i):                   |
+//|      ARITH : lot[i] = InpStartVolume + i * InpVolCoeffArith      |
+//|      GEOM  : lot[i] = InpStartVolume * InpVolCoeffGeom^i         |
 //|    SL = same for all levels (auto-bumped if collides with levels)|
 //|    Fill: L0=market, L1+=pending limit; skip beyond SL            |
 //|    Exit: TP hit → close ALL grid positions                       |
@@ -46,23 +50,16 @@ enum ENUM_SL_BAND
    SL_6 = 6,    // 6σ
 };
 
-enum ENUM_SIZING_MODE
+enum ENUM_GRID_MODE
 {
-   SIZING_RISK       = 0,  // Risk-based: total InpRiskPercent split across armed levels
-   SIZING_MARTINGALE = 1,  // Fixed start volume × multiplier^level_index
+   GRID_MODE_STD         = 0,  // std mode           (σ-based spacing)
+   GRID_MODE_FIXED_POINT = 1,  // fixed point mode   (fixed-point spacing)
 };
 
-enum ENUM_ACC_SIZE
+enum ENUM_VOL_MULT_MODE
 {
-   ACC_EQUITY        = 0,  // Equity
-   ACC_BALANCE       = 1,  // Balance
-   ACC_BALANCE_CREDIT= 2,  // Balance + Credit
-};
-
-enum ENUM_GRID_COEFF_MODE
-{
-   GRID_COEFF_ADDITIVE   = 0,  // lot[i] = start + i * coeff   (arithmetic progression)
-   GRID_COEFF_MULTIPLIER = 1,  // lot[i] = start * coeff^i     (geometric progression)
+   VOL_MULT_ARITH = 0,  // Arithmetic progression: lot[i] = start + i * coeff_arith
+   VOL_MULT_GEOM  = 1,  // Geometric progression:  lot[i] = start * coeff_geom^i
 };
 
 
@@ -92,24 +89,25 @@ input bool   InpEnableShort   = true;      // Enable SHORT entries
 input double InpMinEntryStd   = 1.0;       // Start filter σ (min setup extension, float)
 
 input group "─── Position Sizing ───"
-input ENUM_SIZING_MODE InpSizingMode   = SIZING_MARTINGALE; // Sizing mode
-input double           InpRiskPercent  = 2.0;        // [RISK] Total risk % equity, split across levels
-input double           InpStartVolume  = 0.01;       // [MARTINGALE] Start volume (lot for level 0)
-input double           InpGridMult     = 1.5;        // [MARTINGALE] Multiplier per level (lot[i] = start * mult^i)
-input ENUM_SL_BAND     InpSL_StdLevel  = SL_4;       // SL band level (2σ..6σ)
-input double           InpMaxLotSize   = 1.0;        // Hard cap on lot size (per level)
-input ENUM_ACC_SIZE    InpAccSizeMode  = ACC_EQUITY;  // Account size base (Equity/Balance/Balance+Credit)
-input double           InpCommission   = 0.0;         // Commission per lot (one-way, account currency)
+input double       InpStartVolume = 0.01;     // Start volume (lot for level 0)
+input ENUM_SL_BAND InpSL_StdLevel = SL_4;     // SL band level (2σ..6σ)
+input double       InpMaxLotSize  = 1.0;      // Hard cap on lot size (per level)
 
 input group "─── Grid Entry ───"
-input bool   InpUseGridEntry       = true;    // Master: enable grid entry (DCA adverse)
-input int    InpGridLevels         = 5;       // Grid levels (incl. main entry, 2..10)
-input bool   InpUseSigmaGrid       = true;    // [σ MODE] Enable classic σ-based grid (mutex vs POINT MODE)
-input double InpGridSpacingStd     = 0.5;     // [σ MODE] Grid spacing (σ between levels)
-input bool   InpUsePointGrid       = false;   // [POINT MODE] Enable fixed-point grid (wins over σ MODE if both on)
-input int    InpGridSpacingPoints  = 100;     // [POINT MODE] Fixed spacing (points) between each level
-input ENUM_GRID_COEFF_MODE InpGridCoeffMode = GRID_COEFF_MULTIPLIER; // [POINT MODE] Volume coeff mode (per level)
-input double InpGridCoeff          = 1.5;     // [POINT MODE] Volume coeff (ADD: lot[i]=start+i*coeff | MULT: lot[i]=start*coeff^i)
+input bool               InpUseGridEntry = true;             // enable grid entry
+input ENUM_GRID_MODE     InpGridMode     = GRID_MODE_STD;    // select mode
+input ENUM_VOL_MULT_MODE InpVolMultMode  = VOL_MULT_GEOM;    // select volume mutil mode
+input int                InpGridLevels   = 5;                // Grid levels (incl. main entry, 2..10)
+
+input group "─── std mode metric ───"
+input double InpGridSpacingStd    = 0.5;      // grid spacing (σ between levels)
+
+input group "─── fixed point mode metric ───"
+input int    InpGridSpacingPoints = 100;      // fixed point grid (points between levels)
+
+input group "─── Volume multiplier ───"
+input double InpVolCoeffArith     = 0.02;     // Arithmetic progression coeff (lot[i] = start + i * coeff)
+input double InpVolCoeffGeom      = 1.5;      // Geometric progression coeff  (lot[i] = start * coeff^i)
 
 input group "─── Take Profit (both can be enabled, first hit wins) ───"
 input bool   InpUseTP_USD    = true;      // Enable TP by floating PnL (USD)
@@ -197,11 +195,9 @@ bool          g_windowShort  = false;
 //==================================================================
 //                         GRID MODE RESOLVER
 //==================================================================
-// Effective grid activity. OFF if master off OR both sub-modes off.
-bool GridOn()       { return InpUseGridEntry && (InpUsePointGrid || InpUseSigmaGrid); }
-// Point wins over σ when both are on (warning emitted in OnInit).
-bool GridIsPoint()  { return InpUsePointGrid; }
-bool GridIsSigma()  { return !InpUsePointGrid && InpUseSigmaGrid; }
+bool GridOn()       { return InpUseGridEntry; }
+bool GridIsPoint()  { return InpGridMode == GRID_MODE_FIXED_POINT; }
+bool GridIsStd()    { return InpGridMode == GRID_MODE_STD; }
 
 //==================================================================
 //                              INIT
@@ -242,24 +238,18 @@ int OnInit()
    if(!GridOn())
       grid_str = "OFF";
    else if(GridIsPoint())
-      grid_str = StringFormat("POINT %d@%dpt vol=%s%.2f", InpGridLevels, InpGridSpacingPoints,
-                              InpGridCoeffMode == GRID_COEFF_ADDITIVE ? "+" : "x", InpGridCoeff);
+      grid_str = StringFormat("FIXED_POINT %d@%dpt", InpGridLevels, InpGridSpacingPoints);
    else
-      grid_str = StringFormat("SIGMA %d@%.2fσ", InpGridLevels, InpGridSpacingStd);
+      grid_str = StringFormat("STD %d@%.2fσ", InpGridLevels, InpGridSpacingStd);
 
-   // Warn about ambiguous toggle configurations
-   if(InpUseGridEntry && !InpUseSigmaGrid && !InpUsePointGrid)
-      Print("WARNING: grid master ON but both sub-modes OFF — grid is disabled. Enable σ MODE or POINT MODE.");
-   if(InpUseSigmaGrid && InpUsePointGrid)
-      Print("WARNING: both σ and POINT modes enabled — using POINT MODE. Set InpUseSigmaGrid=false to silence.");
-   string sizing_str = (InpSizingMode == SIZING_MARTINGALE)
-                       ? StringFormat("MART %.2f×%.2f", InpStartVolume, InpGridMult)
-                       : StringFormat("RISK %.1f%%", InpRiskPercent);
-   PrintFormat("EMA14_Fade v1.94 | %s %s | L=%s S=%s | MinExt=%.2fσ Sizing=%s SL=%dσ TP=%s| Grid=%s",
+   string vol_str = (InpVolMultMode == VOL_MULT_ARITH)
+                    ? StringFormat("ARITH start=%.2f +%.2f", InpStartVolume, InpVolCoeffArith)
+                    : StringFormat("GEOM start=%.2f ×%.2f", InpStartVolume, InpVolCoeffGeom);
+   PrintFormat("EMA14_Fade v1.94 | %s %s | L=%s S=%s | MinExt=%.2fσ Vol=%s SL=%dσ TP=%s| Grid=%s",
                _Symbol, EnumToString(_Period),
                InpEnableLong ? "ON" : "OFF",
                InpEnableShort ? "ON" : "OFF",
-               InpMinEntryStd, sizing_str, (int)InpSL_StdLevel,
+               InpMinEntryStd, vol_str, (int)InpSL_StdLevel,
                tp_str, grid_str);
 
    // Reset grid state
@@ -643,9 +633,9 @@ void PanelUpdate()
    _Label("sep2", tx, py + rh * row, "------------------------------", cSep); row++;
 
    // ─ Config summary ─
-   string sz = (InpSizingMode == SIZING_MARTINGALE)
-      ? StringFormat("Mart %.2fx%.1f", InpStartVolume, InpGridMult)
-      : StringFormat("Risk %.1f%%", InpRiskPercent);
+   string sz = (InpVolMultMode == VOL_MULT_ARITH)
+      ? StringFormat("Arith %.2f+%.2f", InpStartVolume, InpVolCoeffArith)
+      : StringFormat("Geom %.2fx%.2f", InpStartVolume, InpVolCoeffGeom);
    _Label("cfg0", tx, py + rh * row,
       StringFormat("L=%s S=%s  %s", InpEnableLong ? "ON" : "--", InpEnableShort ? "ON" : "--", sz), cDim); row++;
 
@@ -653,10 +643,9 @@ void PanelUpdate()
    if(!GridOn())
       grd = "Grid OFF";
    else if(GridIsPoint())
-      grd = StringFormat("Grid POINT %dx%dpt v%s%.2f", InpGridLevels, InpGridSpacingPoints,
-                         InpGridCoeffMode == GRID_COEFF_ADDITIVE ? "+" : "*", InpGridCoeff);
+      grd = StringFormat("Grid POINT %dx%dpt", InpGridLevels, InpGridSpacingPoints);
    else
-      grd = StringFormat("Grid SIGMA %d@%.1fs", InpGridLevels, InpGridSpacingStd);
+      grd = StringFormat("Grid STD %d@%.1fs", InpGridLevels, InpGridSpacingStd);
    _Label("cfg1", tx, py + rh * row,
       StringFormat("SL %ds  %s", (int)InpSL_StdLevel, grd), cDim); row++;
 
@@ -962,71 +951,6 @@ void CloseAllPositions(string reason)
                signalBlockDir > 0 ? "LONG" : signalBlockDir < 0 ? "SHORT" : "NONE", reason);
 }
 
-// Position Sizer formula (matches EarnForex Position Sizer):
-//   lots = RiskMoney / (SL_distance × UnitCost / TickSize + 2 × Commission)
-//
-// Where:
-//   RiskMoney  = AccSize × Risk% / 100
-//   UnitCost   = TICK_VALUE_LOSS (Forex/Futures) or TickSize × ContractSize (CFD/Stocks)
-//   TickSize   = SYMBOL_TRADE_TICK_SIZE
-//   Commission = per-lot one-way commission (counted ×2 for open+close)
-//   SL_distance= |entry − SL| in price units
-//
-// slPriceDistance: SL distance in PRICE (not points!)
-double CalculateLotSize(double slPriceDistance, double risk_percent)
-{
-   // ─── Account size ───
-   double accSize = 0;
-   switch(InpAccSizeMode)
-   {
-      case ACC_EQUITY:         accSize = AccountInfoDouble(ACCOUNT_EQUITY);  break;
-      case ACC_BALANCE:        accSize = AccountInfoDouble(ACCOUNT_BALANCE); break;
-      case ACC_BALANCE_CREDIT: accSize = AccountInfoDouble(ACCOUNT_BALANCE)
-                                       + AccountInfoDouble(ACCOUNT_CREDIT);  break;
-   }
-
-   double riskMoney = accSize * (risk_percent / 100.0);
-
-   // ─── Unit cost (tick value) ───
-   ENUM_SYMBOL_CALC_MODE calcMode = (ENUM_SYMBOL_CALC_MODE)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_CALC_MODE);
-   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double unitCost  = 0;
-
-   if(calcMode == SYMBOL_CALC_MODE_FOREX || calcMode == SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE ||
-      calcMode == SYMBOL_CALC_MODE_FUTURES || calcMode == SYMBOL_CALC_MODE_EXCH_FUTURES ||
-      calcMode == SYMBOL_CALC_MODE_EXCH_FUTURES_FORTS)
-   {
-      unitCost = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
-      if(unitCost <= 0) unitCost = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   }
-   else  // CFD, Stocks, etc.
-   {
-      unitCost = tickSize * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
-   }
-
-   if(tickSize <= 0 || unitCost <= 0 || slPriceDistance <= 0)
-      return SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-
-   // ─── Position Sizer formula ───
-   double commission = InpCommission;  // per lot, one-way
-   double costPerLot = slPriceDistance * unitCost / tickSize + 2.0 * commission;
-
-   if(costPerLot <= 0)
-      return SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-
-   double lots = riskMoney / costPerLot;
-
-   // ─── Normalize to broker constraints ───
-   double vol_min  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double vol_max  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double vol_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-
-   lots = MathFloor(lots / vol_step) * vol_step;  // round DOWN (same as Position Sizer)
-   lots = MathMax(vol_min, MathMin(lots, vol_max));
-   lots = MathMin(lots, InpMaxLotSize);
-   return NormalizeDouble(lots, 2);
-}
-
 //==================================================================
 //                          GRID HELPERS
 //==================================================================
@@ -1121,41 +1045,19 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
       levelValid[j]      = false;
    }
 
-   // ─── Pass 2: sizing per level (by mode) ───
-   // Point mode has its own sizing (ADD / MULT on volume), independent of InpSizingMode.
-   if(GridIsPoint())
+   // ─── Pass 2: volume per level ───
+   // Unified formula, applies to both std and fixed-point modes:
+   //   Arithmetic: lot[i] = start + i * coeff_arith
+   //   Geometric:  lot[i] = start * coeff_geom^i
+   for(int i = 0; i < nLevels; i++)
    {
-      for(int i = 0; i < nLevels; i++)
-      {
-         if(!levelValid[i]) { gridLotByLevel[i] = 0; continue; }
-         double raw;
-         if(InpGridCoeffMode == GRID_COEFF_ADDITIVE)
-            raw = InpStartVolume + i * InpGridCoeff;
-         else
-            raw = InpStartVolume * MathPow((InpGridCoeff > 0 ? InpGridCoeff : 1.0), i);
-         gridLotByLevel[i] = NormalizeLot(MathMax(0.0, raw));
-      }
-   }
-   else if(InpSizingMode == SIZING_MARTINGALE)
-   {
-      // lot[i] = start * mult^i, normalized; skipped levels get 0
-      for(int i = 0; i < nLevels; i++)
-      {
-         if(!levelValid[i]) { gridLotByLevel[i] = 0; continue; }
-         double raw = InpStartVolume * MathPow(InpGridMult, i);
-         gridLotByLevel[i] = NormalizeLot(raw);
-      }
-   }
-   else  // SIZING_RISK
-   {
-      // Total risk split equally across armed levels; each level sized by SL distance from ITS price
-      double risk_per_level = InpRiskPercent / MathMax(1, gridLevelsArmed);
-      for(int i = 0; i < nLevels; i++)
-      {
-         if(!levelValid[i]) { gridLotByLevel[i] = 0; continue; }
-         double sl_dist = MathAbs(gridLevelPrice[i] - slPrice);  // price distance
-         gridLotByLevel[i] = CalculateLotSize(sl_dist, risk_per_level);
-      }
+      if(!levelValid[i]) { gridLotByLevel[i] = 0; continue; }
+      double raw;
+      if(InpVolMultMode == VOL_MULT_ARITH)
+         raw = InpStartVolume + i * InpVolCoeffArith;
+      else
+         raw = InpStartVolume * MathPow((InpVolCoeffGeom > 0 ? InpVolCoeffGeom : 1.0), i);
+      gridLotByLevel[i] = NormalizeLot(MathMax(0.0, raw));
    }
 
    // ─── Log ───
@@ -1165,23 +1067,16 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
       if(i > 0) lot_str += "/";
       lot_str += StringFormat("%.2f", gridLotByLevel[i]);
    }
-   string mode_str;
-   if(GridIsPoint())
-      mode_str = StringFormat("POINT start=%.2f %s%.2f",
-                              InpStartVolume,
-                              InpGridCoeffMode == GRID_COEFF_ADDITIVE ? "+" : "x",
-                              InpGridCoeff);
-   else if(InpSizingMode == SIZING_MARTINGALE)
-      mode_str = StringFormat("MART start=%.2f ×%.2f", InpStartVolume, InpGridMult);
-   else
-      mode_str = StringFormat("RISK %.1f%%/%d", InpRiskPercent, gridLevelsArmed);
+   string vol_str = (InpVolMultMode == VOL_MULT_ARITH)
+                    ? StringFormat("ARITH start=%.2f +%.2f", InpStartVolume, InpVolCoeffArith)
+                    : StringFormat("GEOM start=%.2f ×%.2f", InpStartVolume, InpVolCoeffGeom);
    string spacing_str = GridIsPoint()
       ? StringFormat("%dpt", InpGridSpacingPoints)
       : StringFormat("%.2fσ", InpGridSpacingStd);
    PrintFormat("Grid setup: dir=%s levels=%d (armed=%d) spacing=%s SL=%.5f | %s | lots=[%s]",
                direction > 0 ? "LONG" : "SHORT",
                nLevels, gridLevelsArmed, spacing_str, slPrice,
-               mode_str, lot_str);
+               vol_str, lot_str);
 }
 
 // Place all grid orders in one pass:
