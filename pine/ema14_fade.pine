@@ -64,14 +64,20 @@ entrySlWidth    = input.int(2, "Line width",           minval=1, maxval=5, group
 entrySlExtBars  = input.int(1, "Line extends N bars",  minval=0, maxval=20, group="Entry/SL Lines")
 
 // ─── Inputs: Grid Entry ──────────────────────────────────
-useGridEntry   = input.bool(true, "Enable grid entry",                 group="Grid Entry")
+useGridEntry   = input.bool(true, "Master: enable grid entry",         group="Grid Entry")
 gridLevels     = input.int(5,     "Grid levels (incl. main entry)",    minval=2, maxval=10, group="Grid Entry")
-gridSpacingStd = input.float(0.5, "[σ MODE] Grid spacing (σ between levels)",   step=0.1, minval=0.1, group="Grid Entry",
-     tooltip="σ mode: khoảng cách cố định theo σ. Level 0 = main entry, level i = entry ± i*spacing*σ (adverse).")
-usePointGrid      = input.bool(false, "[POINT MODE] Use fixed-point spacing (overrides σ mode)", group="Grid Entry",
-     tooltip="Bật point mode: mỗi grid cách nhau một số point cố định. Volume coefficient áp riêng cho lot (xem EA), không ảnh hưởng vẽ grid.")
+useSigmaGrid   = input.bool(true, "[σ MODE] Enable classic σ-based grid", group="Grid Entry",
+     tooltip="σ mode: khoảng cách cố định theo σ. Mutex với POINT MODE.")
+gridSpacingStd = input.float(0.5, "[σ MODE] Grid spacing (σ between levels)",   step=0.1, minval=0.1, group="Grid Entry")
+usePointGrid      = input.bool(false, "[POINT MODE] Enable fixed-point grid (wins if both on)", group="Grid Entry",
+     tooltip="Point mode: mỗi grid cách nhau một số point cố định. Nếu bật cùng σ mode, point sẽ được dùng.")
 gridSpacingPoints = input.int(100,    "[POINT MODE] Fixed spacing (points)", minval=1, group="Grid Entry")
 gridLineColor     = input.color(color.new(color.yellow, 20), "Grid line color", group="Grid Entry")
+
+// ─── Effective grid mode resolver ────────────────────────
+gridOn     = useGridEntry and (usePointGrid or useSigmaGrid)
+gridIsPt   = usePointGrid                       // POINT wins when both on
+gridIsSig  = not usePointGrid and useSigmaGrid
 
 // ══════════════════════════════════════════════════════════
 //                       CORE CALC
@@ -267,8 +273,8 @@ if entryLong
              bar_index + entrySlExtBars, slPriceLongAtEntry,
              color=slLongColor, width=entrySlWidth, extend=extend.none)
     // Grid levels: dưới main entry (LONG = DCA xuống)
-    if useGridEntry
-        gapLong = usePointGrid ? gridSpacingPoints * syminfo.mintick : gridSpacingStd * dev
+    if gridOn
+        gapLong = gridIsPt ? gridSpacingPoints * syminfo.mintick : gridSpacingStd * dev
         for g = 1 to gridLevels - 1
             gridPriceLong = entryPriceLong - g * gapLong
             line.new(bar_index - 1, gridPriceLong,
@@ -284,8 +290,8 @@ if entryShort
              bar_index + entrySlExtBars, slPriceShortAtEntry,
              color=slShortColor, width=entrySlWidth, extend=extend.none)
     // Grid levels: trên main entry (SHORT = DCA lên)
-    if useGridEntry
-        gapShort = usePointGrid ? gridSpacingPoints * syminfo.mintick : gridSpacingStd * dev
+    if gridOn
+        gapShort = gridIsPt ? gridSpacingPoints * syminfo.mintick : gridSpacingStd * dev
         for g = 1 to gridLevels - 1
             gridPriceShort = entryPriceShort + g * gapShort
             line.new(bar_index - 1, gridPriceShort,

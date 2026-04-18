@@ -102,10 +102,11 @@ input ENUM_ACC_SIZE    InpAccSizeMode  = ACC_EQUITY;  // Account size base (Equi
 input double           InpCommission   = 0.0;         // Commission per lot (one-way, account currency)
 
 input group "─── Grid Entry ───"
-input bool   InpUseGridEntry       = true;    // Enable grid entry (DCA adverse)
+input bool   InpUseGridEntry       = true;    // Master: enable grid entry (DCA adverse)
 input int    InpGridLevels         = 5;       // Grid levels (incl. main entry, 2..10)
+input bool   InpUseSigmaGrid       = true;    // [σ MODE] Enable classic σ-based grid (mutex vs POINT MODE)
 input double InpGridSpacingStd     = 0.5;     // [σ MODE] Grid spacing (σ between levels)
-input bool   InpUsePointGrid       = false;   // [POINT MODE] Use fixed-point spacing (overrides σ + sizing mode)
+input bool   InpUsePointGrid       = false;   // [POINT MODE] Enable fixed-point grid (wins over σ MODE if both on)
 input int    InpGridSpacingPoints  = 100;     // [POINT MODE] Fixed spacing (points) between each level
 input ENUM_GRID_COEFF_MODE InpGridCoeffMode = GRID_COEFF_MULTIPLIER; // [POINT MODE] Volume coeff mode (per level)
 input double InpGridCoeff          = 1.5;     // [POINT MODE] Volume coeff (ADD: lot[i]=start+i*coeff | MULT: lot[i]=start*coeff^i)
@@ -194,6 +195,15 @@ bool          g_windowLong   = false;
 bool          g_windowShort  = false;
 
 //==================================================================
+//                         GRID MODE RESOLVER
+//==================================================================
+// Effective grid activity. OFF if master off OR both sub-modes off.
+bool GridOn()       { return InpUseGridEntry && (InpUsePointGrid || InpUseSigmaGrid); }
+// Point wins over σ when both are on (warning emitted in OnInit).
+bool GridIsPoint()  { return InpUsePointGrid; }
+bool GridIsSigma()  { return !InpUsePointGrid && InpUseSigmaGrid; }
+
+//==================================================================
 //                              INIT
 //==================================================================
 int OnInit()
@@ -229,13 +239,19 @@ int OnInit()
    if(InpUseTP_Band) tp_str += StringFormat("BAND(B%.2f/S%.2f)σ ", InpTP_BandBuy, InpTP_BandSell);
    if(tp_str == "")  tp_str = "NONE";
    string grid_str;
-   if(!InpUseGridEntry)
+   if(!GridOn())
       grid_str = "OFF";
-   else if(InpUsePointGrid)
-      grid_str = StringFormat("%d@%dpt vol=%s%.2f", InpGridLevels, InpGridSpacingPoints,
+   else if(GridIsPoint())
+      grid_str = StringFormat("POINT %d@%dpt vol=%s%.2f", InpGridLevels, InpGridSpacingPoints,
                               InpGridCoeffMode == GRID_COEFF_ADDITIVE ? "+" : "x", InpGridCoeff);
    else
-      grid_str = StringFormat("%d@%.2fσ", InpGridLevels, InpGridSpacingStd);
+      grid_str = StringFormat("SIGMA %d@%.2fσ", InpGridLevels, InpGridSpacingStd);
+
+   // Warn about ambiguous toggle configurations
+   if(InpUseGridEntry && !InpUseSigmaGrid && !InpUsePointGrid)
+      Print("WARNING: grid master ON but both sub-modes OFF — grid is disabled. Enable σ MODE or POINT MODE.");
+   if(InpUseSigmaGrid && InpUsePointGrid)
+      Print("WARNING: both σ and POINT modes enabled — using POINT MODE. Set InpUseSigmaGrid=false to silence.");
    string sizing_str = (InpSizingMode == SIZING_MARTINGALE)
                        ? StringFormat("MART %.2f×%.2f", InpStartVolume, InpGridMult)
                        : StringFormat("RISK %.1f%%", InpRiskPercent);
@@ -634,13 +650,13 @@ void PanelUpdate()
       StringFormat("L=%s S=%s  %s", InpEnableLong ? "ON" : "--", InpEnableShort ? "ON" : "--", sz), cDim); row++;
 
    string grd;
-   if(!InpUseGridEntry)
+   if(!GridOn())
       grd = "Grid OFF";
-   else if(InpUsePointGrid)
-      grd = StringFormat("Grid %dx%dpt v%s%.2f", InpGridLevels, InpGridSpacingPoints,
+   else if(GridIsPoint())
+      grd = StringFormat("Grid POINT %dx%dpt v%s%.2f", InpGridLevels, InpGridSpacingPoints,
                          InpGridCoeffMode == GRID_COEFF_ADDITIVE ? "+" : "*", InpGridCoeff);
    else
-      grd = StringFormat("Grid %d@%.1fs", InpGridLevels, InpGridSpacingStd);
+      grd = StringFormat("Grid SIGMA %d@%.1fs", InpGridLevels, InpGridSpacingStd);
    _Label("cfg1", tx, py + rh * row,
       StringFormat("SL %ds  %s", (int)InpSL_StdLevel, grd), cDim); row++;
 
@@ -1035,7 +1051,7 @@ double NormalizeLot(double lot)
 // Gap (in price) between consecutive grid levels. Uniform in both modes.
 double GridGapPrice(double dev)
 {
-   return InpUsePointGrid
+   return GridIsPoint()
           ? (_Point * (double)InpGridSpacingPoints)
           : (InpGridSpacingStd * dev);
 }
@@ -1049,7 +1065,7 @@ double TotalGridOffset(int nLevels, double dev)
 
 void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
 {
-   int nLevels = InpUseGridEntry ? InpGridLevels : 1;
+   int nLevels = GridOn() ? InpGridLevels : 1;
    if(nLevels > 10) nLevels = 10;
    if(nLevels < 1)  nLevels = 1;
 
@@ -1107,7 +1123,7 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
 
    // ─── Pass 2: sizing per level (by mode) ───
    // Point mode has its own sizing (ADD / MULT on volume), independent of InpSizingMode.
-   if(InpUsePointGrid)
+   if(GridIsPoint())
    {
       for(int i = 0; i < nLevels; i++)
       {
@@ -1150,7 +1166,7 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
       lot_str += StringFormat("%.2f", gridLotByLevel[i]);
    }
    string mode_str;
-   if(InpUsePointGrid)
+   if(GridIsPoint())
       mode_str = StringFormat("POINT start=%.2f %s%.2f",
                               InpStartVolume,
                               InpGridCoeffMode == GRID_COEFF_ADDITIVE ? "+" : "x",
@@ -1159,7 +1175,7 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
       mode_str = StringFormat("MART start=%.2f ×%.2f", InpStartVolume, InpGridMult);
    else
       mode_str = StringFormat("RISK %.1f%%/%d", InpRiskPercent, gridLevelsArmed);
-   string spacing_str = InpUsePointGrid
+   string spacing_str = GridIsPoint()
       ? StringFormat("%dpt", InpGridSpacingPoints)
       : StringFormat("%.2fσ", InpGridSpacingStd);
    PrintFormat("Grid setup: dir=%s levels=%d (armed=%d) spacing=%s SL=%.5f | %s | lots=[%s]",
@@ -1253,7 +1269,7 @@ void ExecuteLong(double entryExt)
    {
       double sl_mult  = (double)(int)InpSL_StdLevel;
       double grid_ext_sigma = 0;
-      if(InpUseGridEntry && g_dev > 0)
+      if(GridOn() && g_dev > 0)
          grid_ext_sigma = TotalGridOffset(InpGridLevels, g_dev) / g_dev;
       double grid_min  = entryExt + grid_ext_sigma;
       double min_valid = MathMax(entryExt, grid_min) + 1e-6;
@@ -1276,7 +1292,7 @@ void ExecuteLong(double entryExt)
    if(InpTgNotifyEntry)
       SendTelegram(StringFormat("BUY SIGNAL (%.2fσ)\nentry=%.5f SL=%s\ndev=%.5f | grid=%d levels",
                    entryExt, ask, sl > 0 ? DoubleToString(sl, _Digits) : "NONE",
-                   g_dev, InpUseGridEntry ? InpGridLevels : 1));
+                   g_dev, GridOn() ? InpGridLevels : 1));
 
    SetupGrid(+1, ask, sl, g_dev);
    ProcessGridFills();
@@ -1292,7 +1308,7 @@ void ExecuteShort(double entryExt)
    {
       double sl_mult  = (double)(int)InpSL_StdLevel;
       double grid_ext_sigma = 0;
-      if(InpUseGridEntry && g_dev > 0)
+      if(GridOn() && g_dev > 0)
          grid_ext_sigma = TotalGridOffset(InpGridLevels, g_dev) / g_dev;
       double grid_min  = entryExt + grid_ext_sigma;
       double min_valid = MathMax(entryExt, grid_min) + 1e-6;
@@ -1315,7 +1331,7 @@ void ExecuteShort(double entryExt)
    if(InpTgNotifyEntry)
       SendTelegram(StringFormat("SELL SIGNAL (%.2fσ)\nentry=%.5f SL=%s\ndev=%.5f | grid=%d levels",
                    entryExt, bid, sl > 0 ? DoubleToString(sl, _Digits) : "NONE",
-                   g_dev, InpUseGridEntry ? InpGridLevels : 1));
+                   g_dev, GridOn() ? InpGridLevels : 1));
 
    SetupGrid(-1, bid, sl, g_dev);
    ProcessGridFills();
