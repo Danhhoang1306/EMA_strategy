@@ -1234,9 +1234,9 @@ void ProcessGridFills()
       else
       {
          // L0 dùng trade (sync), L1+ dùng tradeAsync — đọc retcode từ instance tương ứng
-         int    rc    = (i == 0) ? trade.ResultRetcode()           : tradeAsync.ResultRetcode();
+         uint   rc    = (i == 0) ? trade.ResultRetcode()           : tradeAsync.ResultRetcode();
          string rcStr = (i == 0) ? trade.ResultRetcodeDescription() : tradeAsync.ResultRetcodeDescription();
-         PrintFormat("Grid L%d ORDER FAILED (%.2f lot): %d (%s)", i, lot, rc, rcStr);
+         PrintFormat("Grid L%d ORDER FAILED (%.2f lot): %u (%s)", i, lot, rc, rcStr);
       }
    }
 }
