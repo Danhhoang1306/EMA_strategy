@@ -258,6 +258,17 @@ int OnInit()
                InpMinEntryStd, vol_str, (int)InpSL_StdLevel,
                tp_str, grid_str);
 
+   // ─── Config sanity checks ───
+   if(InpVolMultMode == VOL_MULT_RISK && InpSL_StdLevel == SL_NONE)
+   {
+      Print("ERROR: 'total inrisk percent' requires SL band level > 0 (needs SL distance for risk formula). Fix settings and reload.");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+   if(InpVolMultMode == VOL_MULT_RISK && InpRiskPercent <= 0)
+      Print("WARNING: toltal risk % balance <= 0 — all grid lots will be minimum volume.");
+   if(InpVolMultMode == VOL_MULT_GEOM && InpVolCoeffGeom <= 0)
+      Print("WARNING: Geometric progression coeff <= 0 — falls back to uniform lot (coeff=1.0).");
+
    // Reset grid state
    gridActive        = false;
    gridDirection     = 0;
