@@ -76,11 +76,9 @@ useGridEntry   = input.bool(true, "Enable grid entry",                 group="Gr
 gridLevels     = input.int(5,     "Grid levels (incl. main entry)",    minval=2, maxval=10, group="Grid Entry")
 gridSpacingStd = input.float(0.5, "[σ MODE] Grid spacing (σ between levels)",   step=0.1, minval=0.1, group="Grid Entry",
      tooltip="σ mode: khoảng cách cố định theo σ.")
-usePointGrid      = input.bool(false, "[POINT MODE] Use fixed-point spacing (overrides σ mode)", group="Grid Entry")
-gridSpacingPoints = input.int(100,    "[POINT MODE] Base spacing (points)", minval=1, group="Grid Entry")
-gridCoeffMode     = input.string("ADD", "[POINT MODE] Coefficient mode", options=["ADD", "MULT"], group="Grid Entry",
-     tooltip="ADD: gap[i] = gap[i-1] + coeff points.\nMULT: gap[i] = gap[i-1] * coeff.")
-gridCoeff         = input.float(0.0, "[POINT MODE] Coefficient (ADD: points/gap | MULT: ratio, 1.0=uniform)", step=0.1, group="Grid Entry")
+usePointGrid      = input.bool(false, "[POINT MODE] Use fixed-point spacing (overrides σ mode)", group="Grid Entry",
+     tooltip="Bật point mode: mỗi grid cách nhau một số point cố định. Volume coefficient áp riêng cho lot (xem EA), không ảnh hưởng vẽ grid.")
+gridSpacingPoints = input.int(100,    "[POINT MODE] Fixed spacing (points)", minval=1, group="Grid Entry")
 gridLineColor     = input.color(color.new(color.yellow, 20), "Grid line color", group="Grid Entry")
 
 // ══════════════════════════════════════════════════════════
@@ -287,17 +285,13 @@ if entryLong
              bar_index + entrySlExtBars, slPriceLongAtEntry,
              color=slLongColor, width=entrySlWidth, extend=extend.none)
     if useGridEntry
-        gapLong    = usePointGrid ? gridSpacingPoints * syminfo.mintick : gridSpacingStd * dev
-        offsetLong = 0.0
+        gapLong = usePointGrid ? gridSpacingPoints * syminfo.mintick : gridSpacingStd * dev
         for g = 1 to gridLevels - 1
-            offsetLong := offsetLong + gapLong
-            gridPriceLong = entryPriceLong - offsetLong
+            gridPriceLong = entryPriceLong - g * gapLong
             line.new(bar_index - 1, gridPriceLong,
                      bar_index + entrySlExtBars, gridPriceLong,
                      color=gridLineColor, width=1,
                      style=line.style_dashed, extend=extend.none)
-            if usePointGrid
-                gapLong := gridCoeffMode == "ADD" ? gapLong + gridCoeff * syminfo.mintick : (gridCoeff > 0 ? gapLong * gridCoeff : gapLong)
 
 if entryShort
     line.new(bar_index - 1, entryPriceShort,
@@ -307,17 +301,13 @@ if entryShort
              bar_index + entrySlExtBars, slPriceShortAtEntry,
              color=slShortColor, width=entrySlWidth, extend=extend.none)
     if useGridEntry
-        gapShort    = usePointGrid ? gridSpacingPoints * syminfo.mintick : gridSpacingStd * dev
-        offsetShort = 0.0
+        gapShort = usePointGrid ? gridSpacingPoints * syminfo.mintick : gridSpacingStd * dev
         for g = 1 to gridLevels - 1
-            offsetShort := offsetShort + gapShort
-            gridPriceShort = entryPriceShort + offsetShort
+            gridPriceShort = entryPriceShort + g * gapShort
             line.new(bar_index - 1, gridPriceShort,
                      bar_index + entrySlExtBars, gridPriceShort,
                      color=gridLineColor, width=1,
                      style=line.style_dashed, extend=extend.none)
-            if usePointGrid
-                gapShort := gridCoeffMode == "ADD" ? gapShort + gridCoeff * syminfo.mintick : (gridCoeff > 0 ? gapShort * gridCoeff : gapShort)
 
 bgcolor(showArmedBg and inWindowLong  ? color.new(color.aqua,    92) : na, title="Armed LONG window")
 bgcolor(showArmedBg and inWindowShort ? color.new(color.fuchsia, 92) : na, title="Armed SHORT window")

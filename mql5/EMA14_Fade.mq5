@@ -61,8 +61,8 @@ enum ENUM_ACC_SIZE
 
 enum ENUM_GRID_COEFF_MODE
 {
-   GRID_COEFF_ADDITIVE   = 0,  // gap[i] = gap[i-1] + coeff points (linear growth)
-   GRID_COEFF_MULTIPLIER = 1,  // gap[i] = gap[i-1] * coeff          (geometric growth)
+   GRID_COEFF_ADDITIVE   = 0,  // lot[i] = start + i * coeff   (arithmetic progression)
+   GRID_COEFF_MULTIPLIER = 1,  // lot[i] = start * coeff^i     (geometric progression)
 };
 
 
@@ -105,10 +105,10 @@ input group "─── Grid Entry ───"
 input bool   InpUseGridEntry       = true;    // Enable grid entry (DCA adverse)
 input int    InpGridLevels         = 5;       // Grid levels (incl. main entry, 2..10)
 input double InpGridSpacingStd     = 0.5;     // [σ MODE] Grid spacing (σ between levels)
-input bool   InpUsePointGrid       = false;   // [POINT MODE] Use fixed-point spacing (overrides σ mode)
-input int    InpGridSpacingPoints  = 100;     // [POINT MODE] Base spacing (points) between levels
-input ENUM_GRID_COEFF_MODE InpGridCoeffMode = GRID_COEFF_ADDITIVE; // [POINT MODE] Coefficient mode
-input double InpGridCoeff          = 0.0;     // [POINT MODE] Coeff (ADD: +points per gap | MULT: ratio, 1.0=uniform)
+input bool   InpUsePointGrid       = false;   // [POINT MODE] Use fixed-point spacing (overrides σ + sizing mode)
+input int    InpGridSpacingPoints  = 100;     // [POINT MODE] Fixed spacing (points) between each level
+input ENUM_GRID_COEFF_MODE InpGridCoeffMode = GRID_COEFF_MULTIPLIER; // [POINT MODE] Volume coeff mode (per level)
+input double InpGridCoeff          = 1.5;     // [POINT MODE] Volume coeff (ADD: lot[i]=start+i*coeff | MULT: lot[i]=start*coeff^i)
 
 input group "─── Take Profit (both can be enabled, first hit wins) ───"
 input bool   InpUseTP_USD    = true;      // Enable TP by floating PnL (USD)
@@ -232,7 +232,7 @@ int OnInit()
    if(!InpUseGridEntry)
       grid_str = "OFF";
    else if(InpUsePointGrid)
-      grid_str = StringFormat("%d@%dpt%s%.2f", InpGridLevels, InpGridSpacingPoints,
+      grid_str = StringFormat("%d@%dpt vol=%s%.2f", InpGridLevels, InpGridSpacingPoints,
                               InpGridCoeffMode == GRID_COEFF_ADDITIVE ? "+" : "x", InpGridCoeff);
    else
       grid_str = StringFormat("%d@%.2fσ", InpGridLevels, InpGridSpacingStd);
@@ -637,7 +637,7 @@ void PanelUpdate()
    if(!InpUseGridEntry)
       grd = "Grid OFF";
    else if(InpUsePointGrid)
-      grd = StringFormat("Grid %dx%dpt%s%.2f", InpGridLevels, InpGridSpacingPoints,
+      grd = StringFormat("Grid %dx%dpt v%s%.2f", InpGridLevels, InpGridSpacingPoints,
                          InpGridCoeffMode == GRID_COEFF_ADDITIVE ? "+" : "*", InpGridCoeff);
    else
       grd = StringFormat("Grid %d@%.1fs", InpGridLevels, InpGridSpacingStd);
@@ -1032,27 +1032,19 @@ double NormalizeLot(double lot)
    return NormalizeDouble(lot, 2);
 }
 
+// Gap (in price) between consecutive grid levels. Uniform in both modes.
+double GridGapPrice(double dev)
+{
+   return InpUsePointGrid
+          ? (_Point * (double)InpGridSpacingPoints)
+          : (InpGridSpacingStd * dev);
+}
+
 // Total offset (in price) from entry to deepest grid level (level nLevels-1).
-// Supports both σ mode and point mode (ADDITIVE / MULTIPLIER coeff).
 double TotalGridOffset(int nLevels, double dev)
 {
    if(nLevels <= 1) return 0.0;
-   double total = 0.0;
-   double gap = InpUsePointGrid
-                ? (_Point * (double)InpGridSpacingPoints)
-                : (InpGridSpacingStd * dev);
-   for(int i = 1; i < nLevels; i++)
-   {
-      total += gap;
-      if(InpUsePointGrid)
-      {
-         if(InpGridCoeffMode == GRID_COEFF_ADDITIVE)
-            gap += _Point * InpGridCoeff;
-         else
-            gap = (InpGridCoeff > 0.0) ? gap * InpGridCoeff : gap;
-      }
-   }
-   return total;
+   return (nLevels - 1) * GridGapPrice(dev);
 }
 
 void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
@@ -1070,14 +1062,12 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
    bool levelValid[10];
    for(int i = 0; i < 10; i++) levelValid[i] = false;
 
-   double cur_offset = 0.0;
-   double cur_gap    = InpUsePointGrid
-                       ? (_Point * (double)InpGridSpacingPoints)
-                       : (InpGridSpacingStd * dev);
+   double gap = GridGapPrice(dev);
 
    for(int i = 0; i < nLevels; i++)
    {
-      double price = (direction > 0) ? (entryPrice - cur_offset) : (entryPrice + cur_offset);
+      double offset = i * gap;
+      double price  = (direction > 0) ? (entryPrice - offset) : (entryPrice + offset);
 
       // Skip if level is beyond SL OR too close to SL (min 1 grid spacing distance)
       // If SL=0 (no SL), skip these checks — all levels are valid
@@ -1085,7 +1075,7 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
       double distToSL = 0, minDistToSL = 0;
       if(slPrice > 0)
       {
-         minDistToSL = cur_gap;
+         minDistToSL = gap;
          distToSL    = MathAbs(price - slPrice);
          beyondSL = (direction > 0) ? (price <= slPrice) : (price >= slPrice);
          tooClose = (distToSL < minDistToSL) && (i > 0);
@@ -1098,24 +1088,13 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
          gridLevelFilled[i] = true;  // mark as consumed
          gridLotByLevel[i]  = 0;
          levelValid[i]      = false;
-      }
-      else
-      {
-         gridLevelPrice[i]  = price;
-         gridLevelFilled[i] = false;
-         levelValid[i]      = true;
-         gridLevelsArmed++;
+         continue;
       }
 
-      // Advance to next level: offset += gap, then grow gap per coeff mode
-      cur_offset += cur_gap;
-      if(InpUsePointGrid)
-      {
-         if(InpGridCoeffMode == GRID_COEFF_ADDITIVE)
-            cur_gap += _Point * InpGridCoeff;
-         else
-            cur_gap = (InpGridCoeff > 0.0) ? cur_gap * InpGridCoeff : cur_gap;
-      }
+      gridLevelPrice[i]  = price;
+      gridLevelFilled[i] = false;
+      levelValid[i]      = true;
+      gridLevelsArmed++;
    }
    // Clear unused slots
    for(int j = nLevels; j < 10; j++)
@@ -1127,7 +1106,21 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
    }
 
    // ─── Pass 2: sizing per level (by mode) ───
-   if(InpSizingMode == SIZING_MARTINGALE)
+   // Point mode has its own sizing (ADD / MULT on volume), independent of InpSizingMode.
+   if(InpUsePointGrid)
+   {
+      for(int i = 0; i < nLevels; i++)
+      {
+         if(!levelValid[i]) { gridLotByLevel[i] = 0; continue; }
+         double raw;
+         if(InpGridCoeffMode == GRID_COEFF_ADDITIVE)
+            raw = InpStartVolume + i * InpGridCoeff;
+         else
+            raw = InpStartVolume * MathPow((InpGridCoeff > 0 ? InpGridCoeff : 1.0), i);
+         gridLotByLevel[i] = NormalizeLot(MathMax(0.0, raw));
+      }
+   }
+   else if(InpSizingMode == SIZING_MARTINGALE)
    {
       // lot[i] = start * mult^i, normalized; skipped levels get 0
       for(int i = 0; i < nLevels; i++)
@@ -1156,12 +1149,18 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
       if(i > 0) lot_str += "/";
       lot_str += StringFormat("%.2f", gridLotByLevel[i]);
    }
-   string mode_str = (InpSizingMode == SIZING_MARTINGALE)
-                     ? StringFormat("MART start=%.2f ×%.2f", InpStartVolume, InpGridMult)
-                     : StringFormat("RISK %.1f%%/%d", InpRiskPercent, gridLevelsArmed);
+   string mode_str;
+   if(InpUsePointGrid)
+      mode_str = StringFormat("POINT start=%.2f %s%.2f",
+                              InpStartVolume,
+                              InpGridCoeffMode == GRID_COEFF_ADDITIVE ? "+" : "x",
+                              InpGridCoeff);
+   else if(InpSizingMode == SIZING_MARTINGALE)
+      mode_str = StringFormat("MART start=%.2f ×%.2f", InpStartVolume, InpGridMult);
+   else
+      mode_str = StringFormat("RISK %.1f%%/%d", InpRiskPercent, gridLevelsArmed);
    string spacing_str = InpUsePointGrid
-      ? StringFormat("%dpt%s%.2f", InpGridSpacingPoints,
-                     InpGridCoeffMode == GRID_COEFF_ADDITIVE ? "+" : "x", InpGridCoeff)
+      ? StringFormat("%dpt", InpGridSpacingPoints)
       : StringFormat("%.2fσ", InpGridSpacingStd);
    PrintFormat("Grid setup: dir=%s levels=%d (armed=%d) spacing=%s SL=%.5f | %s | lots=[%s]",
                direction > 0 ? "LONG" : "SHORT",
