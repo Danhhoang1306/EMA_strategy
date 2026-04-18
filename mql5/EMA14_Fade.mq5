@@ -60,6 +60,7 @@ enum ENUM_VOL_MULT_MODE
 {
    VOL_MULT_ARITH = 0,  // Arithmetic progression: lot[i] = start + i * coeff_arith
    VOL_MULT_GEOM  = 1,  // Geometric progression:  lot[i] = start * coeff_geom^i
+   VOL_MULT_RISK  = 2,  // total inrisk percent:   lot[i] sized from balance × risk% ÷ SL
 };
 
 
@@ -88,26 +89,27 @@ input bool   InpEnableLong    = true;      // Enable LONG entries
 input bool   InpEnableShort   = true;      // Enable SHORT entries
 input double InpMinEntryStd   = 1.0;       // Start filter σ (min setup extension, float)
 
-input group "─── Position Sizing ───"
-input double       InpStartVolume = 0.01;     // Start volume (lot for level 0)
-input ENUM_SL_BAND InpSL_StdLevel = SL_4;     // SL band level (2σ..6σ)
-input double       InpMaxLotSize  = 1.0;      // Hard cap on lot size (per level)
-
 input group "─── Grid Entry ───"
 input bool               InpUseGridEntry = true;             // enable grid entry
 input ENUM_GRID_MODE     InpGridMode     = GRID_MODE_STD;    // select mode
-input ENUM_VOL_MULT_MODE InpVolMultMode  = VOL_MULT_GEOM;    // select volume mutil mode
 input int                InpGridLevels   = 5;                // Grid levels (incl. main entry, 2..10)
 
 input group "─── std mode metric ───"
-input double InpGridSpacingStd    = 0.5;      // grid spacing (σ between levels)
+input double InpGridSpacingStd    = 0.5;      // grid spacing (by std)
 
 input group "─── fixed point mode metric ───"
-input int    InpGridSpacingPoints = 100;      // fixed point grid (points between levels)
+input int    InpGridSpacingPoints = 100;      // fixed point grid (point)
 
 input group "─── Volume multiplier ───"
-input double InpVolCoeffArith     = 0.02;     // Arithmetic progression coeff (lot[i] = start + i * coeff)
-input double InpVolCoeffGeom      = 1.5;      // Geometric progression coeff  (lot[i] = start * coeff^i)
+input ENUM_VOL_MULT_MODE InpVolMultMode  = VOL_MULT_GEOM;    // select volume mutil mode
+input double InpStartVolume       = 0.01;     // start volume
+input double InpVolCoeffArith     = 0.02;     // Arithmetic progression (lot[i] = start + i * coeff)
+input double InpVolCoeffGeom      = 1.5;      // Geometric progression  (lot[i] = start * coeff^i)
+
+input group "─── Toltal in risk percent metric ───"
+input double       InpRiskPercent = 2.0;      // toltal risk % balance
+input ENUM_SL_BAND InpSL_StdLevel = SL_4;     // SL band level
+input double       InpCommission  = 0.0;      // commision per lot (one-way, account currency)
 
 input group "─── Take Profit (both can be enabled, first hit wins) ───"
 input bool   InpUseTP_USD    = true;      // Enable TP by floating PnL (USD)
@@ -242,9 +244,13 @@ int OnInit()
    else
       grid_str = StringFormat("STD %d@%.2fσ", InpGridLevels, InpGridSpacingStd);
 
-   string vol_str = (InpVolMultMode == VOL_MULT_ARITH)
-                    ? StringFormat("ARITH start=%.2f +%.2f", InpStartVolume, InpVolCoeffArith)
-                    : StringFormat("GEOM start=%.2f ×%.2f", InpStartVolume, InpVolCoeffGeom);
+   string vol_str;
+   if(InpVolMultMode == VOL_MULT_ARITH)
+      vol_str = StringFormat("ARITH start=%.2f +%.2f", InpStartVolume, InpVolCoeffArith);
+   else if(InpVolMultMode == VOL_MULT_GEOM)
+      vol_str = StringFormat("GEOM start=%.2f ×%.2f", InpStartVolume, InpVolCoeffGeom);
+   else
+      vol_str = StringFormat("RISK %.1f%%", InpRiskPercent);
    PrintFormat("EMA14_Fade v1.94 | %s %s | L=%s S=%s | MinExt=%.2fσ Vol=%s SL=%dσ TP=%s| Grid=%s",
                _Symbol, EnumToString(_Period),
                InpEnableLong ? "ON" : "OFF",
@@ -633,9 +639,13 @@ void PanelUpdate()
    _Label("sep2", tx, py + rh * row, "------------------------------", cSep); row++;
 
    // ─ Config summary ─
-   string sz = (InpVolMultMode == VOL_MULT_ARITH)
-      ? StringFormat("Arith %.2f+%.2f", InpStartVolume, InpVolCoeffArith)
-      : StringFormat("Geom %.2fx%.2f", InpStartVolume, InpVolCoeffGeom);
+   string sz;
+   if(InpVolMultMode == VOL_MULT_ARITH)
+      sz = StringFormat("Arith %.2f+%.2f", InpStartVolume, InpVolCoeffArith);
+   else if(InpVolMultMode == VOL_MULT_GEOM)
+      sz = StringFormat("Geom %.2fx%.2f", InpStartVolume, InpVolCoeffGeom);
+   else
+      sz = StringFormat("Risk %.1f%%", InpRiskPercent);
    _Label("cfg0", tx, py + rh * row,
       StringFormat("L=%s S=%s  %s", InpEnableLong ? "ON" : "--", InpEnableShort ? "ON" : "--", sz), cDim); row++;
 
@@ -959,7 +969,39 @@ void CloseAllPositions(string reason)
 // entryPrice: market price khi signal fire
 // slPrice: SL chung cho toàn grid
 // dev: stdev tại bar signal
-// Normalize 1 lot value to broker's volume step / min / max / hard cap
+// Risk-based lot for one grid level.
+//   lots = riskMoney / (slPriceDistance × unitCost / tickSize + 2 × commission)
+// riskMoney = balance × risk_percent / 100
+double RiskLot(double slPriceDistance, double risk_percent)
+{
+   if(slPriceDistance <= 0) return SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+
+   double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskMoney = balance * (risk_percent / 100.0);
+
+   ENUM_SYMBOL_CALC_MODE calcMode = (ENUM_SYMBOL_CALC_MODE)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_CALC_MODE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double unitCost = 0;
+   if(calcMode == SYMBOL_CALC_MODE_FOREX || calcMode == SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE ||
+      calcMode == SYMBOL_CALC_MODE_FUTURES || calcMode == SYMBOL_CALC_MODE_EXCH_FUTURES ||
+      calcMode == SYMBOL_CALC_MODE_EXCH_FUTURES_FORTS)
+   {
+      unitCost = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
+      if(unitCost <= 0) unitCost = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   }
+   else
+      unitCost = tickSize * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+
+   if(tickSize <= 0 || unitCost <= 0)
+      return SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+
+   double costPerLot = slPriceDistance * unitCost / tickSize + 2.0 * InpCommission;
+   if(costPerLot <= 0) return SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+
+   return riskMoney / costPerLot;
+}
+
+// Normalize 1 lot value to broker's volume step / min / max
 double NormalizeLot(double lot)
 {
    double vol_min  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -968,7 +1010,6 @@ double NormalizeLot(double lot)
    if(vol_step <= 0) vol_step = 0.01;
    lot = MathFloor(lot / vol_step) * vol_step;
    lot = MathMax(vol_min, MathMin(lot, vol_max));
-   lot = MathMin(lot, InpMaxLotSize);
    return NormalizeDouble(lot, 2);
 }
 
@@ -1046,18 +1087,31 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
    }
 
    // ─── Pass 2: volume per level ───
-   // Unified formula, applies to both std and fixed-point modes:
-   //   Arithmetic: lot[i] = start + i * coeff_arith
-   //   Geometric:  lot[i] = start * coeff_geom^i
-   for(int i = 0; i < nLevels; i++)
+   // Arithmetic: lot[i] = start + i * coeff_arith
+   // Geometric:  lot[i] = start * coeff_geom^i
+   // Risk    : risk_per_level = InpRiskPercent / armed; lot[i] sized from SL distance
+   if(InpVolMultMode == VOL_MULT_RISK)
    {
-      if(!levelValid[i]) { gridLotByLevel[i] = 0; continue; }
-      double raw;
-      if(InpVolMultMode == VOL_MULT_ARITH)
-         raw = InpStartVolume + i * InpVolCoeffArith;
-      else
-         raw = InpStartVolume * MathPow((InpVolCoeffGeom > 0 ? InpVolCoeffGeom : 1.0), i);
-      gridLotByLevel[i] = NormalizeLot(MathMax(0.0, raw));
+      double risk_per_level = InpRiskPercent / MathMax(1, gridLevelsArmed);
+      for(int i = 0; i < nLevels; i++)
+      {
+         if(!levelValid[i]) { gridLotByLevel[i] = 0; continue; }
+         double sl_dist = MathAbs(gridLevelPrice[i] - slPrice);
+         gridLotByLevel[i] = NormalizeLot(RiskLot(sl_dist, risk_per_level));
+      }
+   }
+   else
+   {
+      for(int i = 0; i < nLevels; i++)
+      {
+         if(!levelValid[i]) { gridLotByLevel[i] = 0; continue; }
+         double raw;
+         if(InpVolMultMode == VOL_MULT_ARITH)
+            raw = InpStartVolume + i * InpVolCoeffArith;
+         else
+            raw = InpStartVolume * MathPow((InpVolCoeffGeom > 0 ? InpVolCoeffGeom : 1.0), i);
+         gridLotByLevel[i] = NormalizeLot(MathMax(0.0, raw));
+      }
    }
 
    // ─── Log ───
@@ -1067,9 +1121,13 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
       if(i > 0) lot_str += "/";
       lot_str += StringFormat("%.2f", gridLotByLevel[i]);
    }
-   string vol_str = (InpVolMultMode == VOL_MULT_ARITH)
-                    ? StringFormat("ARITH start=%.2f +%.2f", InpStartVolume, InpVolCoeffArith)
-                    : StringFormat("GEOM start=%.2f ×%.2f", InpStartVolume, InpVolCoeffGeom);
+   string vol_str;
+   if(InpVolMultMode == VOL_MULT_ARITH)
+      vol_str = StringFormat("ARITH start=%.2f +%.2f", InpStartVolume, InpVolCoeffArith);
+   else if(InpVolMultMode == VOL_MULT_GEOM)
+      vol_str = StringFormat("GEOM start=%.2f ×%.2f", InpStartVolume, InpVolCoeffGeom);
+   else
+      vol_str = StringFormat("RISK %.1f%%/%d", InpRiskPercent, gridLevelsArmed);
    string spacing_str = GridIsPoint()
       ? StringFormat("%dpt", InpGridSpacingPoints)
       : StringFormat("%.2fσ", InpGridSpacingStd);

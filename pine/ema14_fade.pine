@@ -67,23 +67,33 @@ entrySlExtBars  = input.int(1, "Line extends N bars",  minval=0, maxval=20, grou
 useGridEntry  = input.bool(true, "enable grid entry", group="Grid Entry")
 gridMode      = input.string("std mode", "select mode",
      options=["std mode", "fixed point mode"], group="Grid Entry")
-volMultMode   = input.string("Geometric progression", "select volume mutil mode",
-     options=["Arithmetic progression", "Geometric progression"], group="Grid Entry")
 gridLevels    = input.int(5, "Grid levels (incl. main entry)", minval=2, maxval=10, group="Grid Entry")
 
 // std mode metric
-gridSpacingStd    = input.float(0.5, "grid spacing (σ between levels)", step=0.1, minval=0.1,
+gridSpacingStd    = input.float(0.5, "grid spacing (by std)", step=0.1, minval=0.1,
      group="std mode metric")
 
 // fixed point mode metric
-gridSpacingPoints = input.int(100, "fixed point grid (points between levels)", minval=1,
+gridSpacingPoints = input.int(100, "fixed point grid (point)", minval=1,
      group="fixed point mode metric")
 
 // Volume multiplier
-volCoeffArith = input.float(0.02, "Arithmetic progression coeff (lot[i]=start+i*coeff)", step=0.01,
+volMultMode   = input.string("Geometric progression", "select volume mutil mode",
+     options=["Arithmetic progression", "Geometric progression", "total inrisk percent"],
      group="Volume multiplier")
-volCoeffGeom  = input.float(1.5,  "Geometric progression coeff (lot[i]=start*coeff^i)", step=0.1,
+startVolume   = input.float(0.01, "start volume", step=0.01, group="Volume multiplier")
+volCoeffArith = input.float(0.02, "Arithmetic progression (lot[i]=start+i*coeff)", step=0.01,
      group="Volume multiplier")
+volCoeffGeom  = input.float(1.5,  "Geometric progression (lot[i]=start*coeff^i)", step=0.1,
+     group="Volume multiplier")
+
+// Toltal in risk percent metric
+riskPercent   = input.float(2.0, "toltal risk % balance", step=0.1, minval=0.1,
+     group="Toltal in risk percent metric",
+     tooltip="Chỉ dùng khi select volume mutil mode = total inrisk percent. Chia đều risk % cho các armed levels.")
+commission    = input.float(0.0, "commision per lot", step=0.1,
+     group="Toltal in risk percent metric",
+     tooltip="Commission one-way per lot, dùng trong công thức risk sizing.")
 
 gridLineColor = input.color(color.new(color.yellow, 20), "Grid line color", group="Grid Entry")
 
