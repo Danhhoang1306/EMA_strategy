@@ -66,9 +66,14 @@ entrySlExtBars  = input.int(1, "Line extends N bars",  minval=0, maxval=20, grou
 // ─── Inputs: Grid Entry ──────────────────────────────────
 useGridEntry   = input.bool(true, "Enable grid entry",                 group="Grid Entry")
 gridLevels     = input.int(5,     "Grid levels (incl. main entry)",    minval=2, maxval=10, group="Grid Entry")
-gridSpacingStd = input.float(0.5, "Grid spacing (σ between levels)",   step=0.1, minval=0.1, group="Grid Entry",
-     tooltip="Khoảng cách giữa các level, tính theo σ. Level 0 = main entry, level i = entry + i*spacing*σ theo chiều adverse (LONG=xuống, SHORT=lên).")
-gridLineColor  = input.color(color.new(color.yellow, 20), "Grid line color", group="Grid Entry")
+gridSpacingStd = input.float(0.5, "[σ MODE] Grid spacing (σ between levels)",   step=0.1, minval=0.1, group="Grid Entry",
+     tooltip="σ mode: khoảng cách cố định theo σ. Level 0 = main entry, level i = entry ± i*spacing*σ (adverse).")
+usePointGrid      = input.bool(false, "[POINT MODE] Use fixed-point spacing (overrides σ mode)", group="Grid Entry")
+gridSpacingPoints = input.int(100,    "[POINT MODE] Base spacing (points)", minval=1, group="Grid Entry")
+gridCoeffMode     = input.string("ADD", "[POINT MODE] Coefficient mode", options=["ADD", "MULT"], group="Grid Entry",
+     tooltip="ADD: gap[i] = gap[i-1] + coeff points (linear growth).\nMULT: gap[i] = gap[i-1] * coeff (geometric growth).")
+gridCoeff         = input.float(0.0, "[POINT MODE] Coefficient (ADD: points/gap | MULT: ratio, 1.0=uniform)", step=0.1, group="Grid Entry")
+gridLineColor     = input.color(color.new(color.yellow, 20), "Grid line color", group="Grid Entry")
 
 // ══════════════════════════════════════════════════════════
 //                       CORE CALC
@@ -265,12 +270,17 @@ if entryLong
              color=slLongColor, width=entrySlWidth, extend=extend.none)
     // Grid levels: dưới main entry (LONG = DCA xuống)
     if useGridEntry
+        gapLong    = usePointGrid ? gridSpacingPoints * syminfo.mintick : gridSpacingStd * dev
+        offsetLong = 0.0
         for g = 1 to gridLevels - 1
-            gridPriceLong = entryPriceLong - g * gridSpacingStd * dev
+            offsetLong := offsetLong + gapLong
+            gridPriceLong = entryPriceLong - offsetLong
             line.new(bar_index - 1, gridPriceLong,
                      bar_index + entrySlExtBars, gridPriceLong,
                      color=gridLineColor, width=1,
                      style=line.style_dashed, extend=extend.none)
+            if usePointGrid
+                gapLong := gridCoeffMode == "ADD" ? gapLong + gridCoeff * syminfo.mintick : (gridCoeff > 0 ? gapLong * gridCoeff : gapLong)
 
 if entryShort
     line.new(bar_index - 1, entryPriceShort,
@@ -281,12 +291,17 @@ if entryShort
              color=slShortColor, width=entrySlWidth, extend=extend.none)
     // Grid levels: trên main entry (SHORT = DCA lên)
     if useGridEntry
+        gapShort    = usePointGrid ? gridSpacingPoints * syminfo.mintick : gridSpacingStd * dev
+        offsetShort = 0.0
         for g = 1 to gridLevels - 1
-            gridPriceShort = entryPriceShort + g * gridSpacingStd * dev
+            offsetShort := offsetShort + gapShort
+            gridPriceShort = entryPriceShort + offsetShort
             line.new(bar_index - 1, gridPriceShort,
                      bar_index + entrySlExtBars, gridPriceShort,
                      color=gridLineColor, width=1,
                      style=line.style_dashed, extend=extend.none)
+            if usePointGrid
+                gapShort := gridCoeffMode == "ADD" ? gapShort + gridCoeff * syminfo.mintick : (gridCoeff > 0 ? gapShort * gridCoeff : gapShort)
 
 bgcolor(showArmedBg and inWindowLong  ? color.new(color.aqua,    92) : na, title="Armed LONG window")
 bgcolor(showArmedBg and inWindowShort ? color.new(color.fuchsia, 92) : na, title="Armed SHORT window")

@@ -59,6 +59,12 @@ enum ENUM_ACC_SIZE
    ACC_BALANCE_CREDIT= 2,  // Balance + Credit
 };
 
+enum ENUM_GRID_COEFF_MODE
+{
+   GRID_COEFF_ADDITIVE   = 0,  // gap[i] = gap[i-1] + coeff points (linear growth)
+   GRID_COEFF_MULTIPLIER = 1,  // gap[i] = gap[i-1] * coeff          (geometric growth)
+};
+
 
 //==================================================================
 //                              INPUTS
@@ -96,9 +102,13 @@ input ENUM_ACC_SIZE    InpAccSizeMode  = ACC_EQUITY;  // Account size base (Equi
 input double           InpCommission   = 0.0;         // Commission per lot (one-way, account currency)
 
 input group "─── Grid Entry ───"
-input bool   InpUseGridEntry    = true;    // Enable grid entry (DCA adverse)
-input int    InpGridLevels      = 5;       // Grid levels (incl. main entry, 2..10)
-input double InpGridSpacingStd  = 0.5;     // Grid spacing (σ between levels)
+input bool   InpUseGridEntry       = true;    // Enable grid entry (DCA adverse)
+input int    InpGridLevels         = 5;       // Grid levels (incl. main entry, 2..10)
+input double InpGridSpacingStd     = 0.5;     // [σ MODE] Grid spacing (σ between levels)
+input bool   InpUsePointGrid       = false;   // [POINT MODE] Use fixed-point spacing (overrides σ mode)
+input int    InpGridSpacingPoints  = 100;     // [POINT MODE] Base spacing (points) between levels
+input ENUM_GRID_COEFF_MODE InpGridCoeffMode = GRID_COEFF_ADDITIVE; // [POINT MODE] Coefficient mode
+input double InpGridCoeff          = 0.0;     // [POINT MODE] Coeff (ADD: +points per gap | MULT: ratio, 1.0=uniform)
 
 input group "─── Take Profit (both can be enabled, first hit wins) ───"
 input bool   InpUseTP_USD    = true;      // Enable TP by floating PnL (USD)
@@ -218,9 +228,14 @@ int OnInit()
    if(InpUseTP_USD)  tp_str += StringFormat("USD$%.2f ", InpTP_USD);
    if(InpUseTP_Band) tp_str += StringFormat("BAND(B%.2f/S%.2f)σ ", InpTP_BandBuy, InpTP_BandSell);
    if(tp_str == "")  tp_str = "NONE";
-   string grid_str = InpUseGridEntry
-                     ? StringFormat("%d@%.2fσ", InpGridLevels, InpGridSpacingStd)
-                     : "OFF";
+   string grid_str;
+   if(!InpUseGridEntry)
+      grid_str = "OFF";
+   else if(InpUsePointGrid)
+      grid_str = StringFormat("%d@%dpt%s%.2f", InpGridLevels, InpGridSpacingPoints,
+                              InpGridCoeffMode == GRID_COEFF_ADDITIVE ? "+" : "x", InpGridCoeff);
+   else
+      grid_str = StringFormat("%d@%.2fσ", InpGridLevels, InpGridSpacingStd);
    string sizing_str = (InpSizingMode == SIZING_MARTINGALE)
                        ? StringFormat("MART %.2f×%.2f", InpStartVolume, InpGridMult)
                        : StringFormat("RISK %.1f%%", InpRiskPercent);
@@ -618,8 +633,14 @@ void PanelUpdate()
    _Label("cfg0", tx, py + rh * row,
       StringFormat("L=%s S=%s  %s", InpEnableLong ? "ON" : "--", InpEnableShort ? "ON" : "--", sz), cDim); row++;
 
-   string grd = InpUseGridEntry
-      ? StringFormat("Grid %d@%.1fs", InpGridLevels, InpGridSpacingStd) : "Grid OFF";
+   string grd;
+   if(!InpUseGridEntry)
+      grd = "Grid OFF";
+   else if(InpUsePointGrid)
+      grd = StringFormat("Grid %dx%dpt%s%.2f", InpGridLevels, InpGridSpacingPoints,
+                         InpGridCoeffMode == GRID_COEFF_ADDITIVE ? "+" : "*", InpGridCoeff);
+   else
+      grd = StringFormat("Grid %d@%.1fs", InpGridLevels, InpGridSpacingStd);
    _Label("cfg1", tx, py + rh * row,
       StringFormat("SL %ds  %s", (int)InpSL_StdLevel, grd), cDim); row++;
 
@@ -1011,6 +1032,29 @@ double NormalizeLot(double lot)
    return NormalizeDouble(lot, 2);
 }
 
+// Total offset (in price) from entry to deepest grid level (level nLevels-1).
+// Supports both σ mode and point mode (ADDITIVE / MULTIPLIER coeff).
+double TotalGridOffset(int nLevels, double dev)
+{
+   if(nLevels <= 1) return 0.0;
+   double total = 0.0;
+   double gap = InpUsePointGrid
+                ? (_Point * (double)InpGridSpacingPoints)
+                : (InpGridSpacingStd * dev);
+   for(int i = 1; i < nLevels; i++)
+   {
+      total += gap;
+      if(InpUsePointGrid)
+      {
+         if(InpGridCoeffMode == GRID_COEFF_ADDITIVE)
+            gap += _Point * InpGridCoeff;
+         else
+            gap = (InpGridCoeff > 0.0) ? gap * InpGridCoeff : gap;
+      }
+   }
+   return total;
+}
+
 void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
 {
    int nLevels = InpUseGridEntry ? InpGridLevels : 1;
@@ -1026,10 +1070,14 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
    bool levelValid[10];
    for(int i = 0; i < 10; i++) levelValid[i] = false;
 
+   double cur_offset = 0.0;
+   double cur_gap    = InpUsePointGrid
+                       ? (_Point * (double)InpGridSpacingPoints)
+                       : (InpGridSpacingStd * dev);
+
    for(int i = 0; i < nLevels; i++)
    {
-      double offset = i * InpGridSpacingStd * dev;
-      double price  = (direction > 0) ? (entryPrice - offset) : (entryPrice + offset);
+      double price = (direction > 0) ? (entryPrice - cur_offset) : (entryPrice + cur_offset);
 
       // Skip if level is beyond SL OR too close to SL (min 1 grid spacing distance)
       // If SL=0 (no SL), skip these checks — all levels are valid
@@ -1037,7 +1085,7 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
       double distToSL = 0, minDistToSL = 0;
       if(slPrice > 0)
       {
-         minDistToSL = InpGridSpacingStd * dev;
+         minDistToSL = cur_gap;
          distToSL    = MathAbs(price - slPrice);
          beyondSL = (direction > 0) ? (price <= slPrice) : (price >= slPrice);
          tooClose = (distToSL < minDistToSL) && (i > 0);
@@ -1050,13 +1098,24 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
          gridLevelFilled[i] = true;  // mark as consumed
          gridLotByLevel[i]  = 0;
          levelValid[i]      = false;
-         continue;
+      }
+      else
+      {
+         gridLevelPrice[i]  = price;
+         gridLevelFilled[i] = false;
+         levelValid[i]      = true;
+         gridLevelsArmed++;
       }
 
-      gridLevelPrice[i]  = price;
-      gridLevelFilled[i] = false;
-      levelValid[i]      = true;
-      gridLevelsArmed++;
+      // Advance to next level: offset += gap, then grow gap per coeff mode
+      cur_offset += cur_gap;
+      if(InpUsePointGrid)
+      {
+         if(InpGridCoeffMode == GRID_COEFF_ADDITIVE)
+            cur_gap += _Point * InpGridCoeff;
+         else
+            cur_gap = (InpGridCoeff > 0.0) ? cur_gap * InpGridCoeff : cur_gap;
+      }
    }
    // Clear unused slots
    for(int j = nLevels; j < 10; j++)
@@ -1100,9 +1159,13 @@ void SetupGrid(int direction, double entryPrice, double slPrice, double dev)
    string mode_str = (InpSizingMode == SIZING_MARTINGALE)
                      ? StringFormat("MART start=%.2f ×%.2f", InpStartVolume, InpGridMult)
                      : StringFormat("RISK %.1f%%/%d", InpRiskPercent, gridLevelsArmed);
-   PrintFormat("Grid setup: dir=%s levels=%d (armed=%d) spacing=%.2fσ SL=%.5f | %s | lots=[%s]",
+   string spacing_str = InpUsePointGrid
+      ? StringFormat("%dpt%s%.2f", InpGridSpacingPoints,
+                     InpGridCoeffMode == GRID_COEFF_ADDITIVE ? "+" : "x", InpGridCoeff)
+      : StringFormat("%.2fσ", InpGridSpacingStd);
+   PrintFormat("Grid setup: dir=%s levels=%d (armed=%d) spacing=%s SL=%.5f | %s | lots=[%s]",
                direction > 0 ? "LONG" : "SHORT",
-               nLevels, gridLevelsArmed, InpGridSpacingStd, slPrice,
+               nLevels, gridLevelsArmed, spacing_str, slPrice,
                mode_str, lot_str);
 }
 
@@ -1190,7 +1253,10 @@ void ExecuteLong(double entryExt)
    if(InpSL_StdLevel != SL_NONE)
    {
       double sl_mult  = (double)(int)InpSL_StdLevel;
-      double grid_min = entryExt + (InpUseGridEntry ? (InpGridLevels - 1) * InpGridSpacingStd : 0);
+      double grid_ext_sigma = 0;
+      if(InpUseGridEntry && g_dev > 0)
+         grid_ext_sigma = TotalGridOffset(InpGridLevels, g_dev) / g_dev;
+      double grid_min  = entryExt + grid_ext_sigma;
       double min_valid = MathMax(entryExt, grid_min) + 1e-6;
       bool   bumped   = false;
       if(sl_mult <= min_valid)
@@ -1226,7 +1292,10 @@ void ExecuteShort(double entryExt)
    if(InpSL_StdLevel != SL_NONE)
    {
       double sl_mult  = (double)(int)InpSL_StdLevel;
-      double grid_min = entryExt + (InpUseGridEntry ? (InpGridLevels - 1) * InpGridSpacingStd : 0);
+      double grid_ext_sigma = 0;
+      if(InpUseGridEntry && g_dev > 0)
+         grid_ext_sigma = TotalGridOffset(InpGridLevels, g_dev) / g_dev;
+      double grid_min  = entryExt + grid_ext_sigma;
       double min_valid = MathMax(entryExt, grid_min) + 1e-6;
       bool   bumped   = false;
       if(sl_mult <= min_valid)
